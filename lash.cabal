@@ -16,7 +16,11 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Lash
+                     , Lash.AST
+                     , Lash.AST.Parser
   build-depends:       base >= 4.7 && < 5
+                     , parsec
+                     , text
   default-language:    Haskell2010
 
 executable lash-exe
@@ -33,6 +37,10 @@ test-suite lash-test
   main-is:             Spec.hs
   build-depends:       base
                      , lash
+                     , hspec
+                     , hspec-discover
+                     , QuickCheck
+                     , text
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
