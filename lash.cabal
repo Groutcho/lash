@@ -18,9 +18,18 @@ library
   exposed-modules:     Lash
                      , Lash.AST
                      , Lash.AST.Parser
+                     , Lash.Instructions
   build-depends:       base >= 4.7 && < 5
                      , parsec
                      , text
+                     , directory
+                     , process
+                     , streaming-commons
+                     , conduit-extra
+                     , conduit
+                     , resourcet
+                     , bytestring
+                     , unix
   default-language:    Haskell2010
 
 executable lash-exe

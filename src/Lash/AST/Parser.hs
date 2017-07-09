@@ -21,18 +21,17 @@ uppercaseLetters = ['A'..'Z']
 letters :: String
 letters = lowercaseLetters ++ uppercaseLetters
 
--- data IOFileMode = IOClobber
---                 | IOFrom
---                 | IOTo
---                 | IOReadWrite
---                 | IOAppend
---                 deriving (Eq, Ord, Show)
-
 ioFile :: GenParser st IOFile
-ioFile = IOFile <$> ioFileMode <*> word
+ioFile = IOFile <$> optionMaybe fd <*> ioFileMode <*> word
+
+fd :: GenParser st Int
+fd = do
+    d <- many1 $ oneOf digits
+    return (read d :: Int)
 
 ioFileMode :: GenParser st IOFileMode
 ioFileMode = do
+    spaces
     c <- oneOf "><"
     c' <- optionMaybe $ oneOf "><|&"
     let xs = catMaybes [Just c, c']
@@ -44,6 +43,7 @@ ioFileMode = do
         "<>" -> return IOReadWrite
         "<&" -> return IOFromBoth
         ">&" -> return IOToBoth
+        _ -> error "just to appease the type checker"
 
 assignment :: GenParser st Assignment
 assignment = do
@@ -71,7 +71,9 @@ quoted = do
     s <- manyTill quotedWordChar (char c)
     case s of
         [] -> return EmptyWord
-        _  -> return $ Quoted (T.pack s)
+        _  -> case c of
+            '\'' -> return $ SingleQuoted (T.pack s)
+            '\"' -> return $ Quoted (T.pack s)
 
 unquoted :: GenParser st Word
 unquoted = many1 wordChar >>= \s -> return $ Unquoted (T.pack s)
