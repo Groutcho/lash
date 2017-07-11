@@ -12,7 +12,7 @@ import           Data.Monoid                  ((<>))
 import           Data.Conduit
 import           Data.ByteString              (ByteString)
 import qualified Data.Conduit.Binary as CB
-import qualified Data.Streaming.Process as SP
+import qualified Data.Conduit.Process as CP
 import           System.Directory             (findExecutable)
 import           System.Exit                  (ExitCode)
 import           System.IO
@@ -26,7 +26,31 @@ import Prelude hiding (Word, putStrLn)
 
 assignX = Assign (Name "x") (Unquoted "valueX")
 assignY = Assign (Name "y") (Unquoted "valueY")
-cat f = Command (Unquoted "cat") [Unquoted f] [] []
+cat f = Command (Unquoted "cat") [Unquoted f] []
+grep x = Command (Unquoted "grep") [Unquoted x] []
+
+pg0 = [ ClosedStdin
+      , PushHandle stdout
+      , PushHandle stderr
+      , cat "lash.cabal"
+      , RunPendingActions
+      ]
+
+pg1 = [ Assign (Name "x") (Unquoted "valueX")
+      , Export (Name "x")
+      , ClosedStdin
+      , Pipe Output
+      , PushHandle stderr
+      , cat "lash.cabal"
+      , Pipe Output
+      , PushHandle stderr
+      , grep "a"
+      , PushHandle stdout
+      , PushHandle stderr
+      , Command (Unquoted "wc") [Unquoted "-l"] [ IOFile Nothing IOTo (Unquoted "wc-write.txt")
+                                                , IOFile Nothing IOAppend (Unquoted "wc-append.txt")
+                                                ]
+      ]
 
 class Compilable a where
   compile :: a -> [Instruction]
@@ -35,22 +59,42 @@ instance Compilable Assignment where
     compile (Assignment n w) = [Assign n w]
 
 data Instruction = Assign Name Word
-                 | WaitRunningActions
+                 | ClosedStdin
                  | Export Name
-                 | Command Word [Word] [IOFile] [IOFile]
+                 | Command Word [Word] [IOFile]
+                 | PushHandle Handle
+                 | Pipe ConduitTarget
+                 | RunPendingActions
                  deriving (Show)
 
+data ConduitTarget = Input | Output | Error deriving (Show, Eq, Ord)
+
+cmd :: T.Text -> Instruction
+cmd c = Command (Unquoted c) [] []
+
+cmd' :: T.Text -> [T.Text] -> Instruction
+cmd' c a = Command (Unquoted c) (Unquoted <$> a) []
+
 getReadable :: Instruction -> T.Text
-getReadable (Assign (Name n) w)  = "ASSIGN      " <> n <> " := " <> (getValue w)
-getReadable (Export (Name n))    = "EXPORT      " <> n
-getReadable WaitRunningActions   = "WAIT        "
-getReadable (Command w args _ _) = "COMMAND     " <> (getValue w)
+getReadable (Assign (Name n) w)  = "Assign    " <> n <> " := " <> (getValue w)
+getReadable (Export (Name n))    = "Export    " <> n
+getReadable (Command w args ios)     = "StartCmd  " <> (getValue w) <> " " <> (T.intercalate " " $ getValue <$> args)
+getReadable (PushHandle h)
+  | h == stdin  = "PushHndl  stdin"
+  | h == stdout = "PushHndl  stdout"
+  | h == stderr = "PushHndl  stderr"
+getReadable (Pipe tgt)           = "Pipe      " <> (T.pack $ show tgt)
+getReadable RunPendingActions    = "RunCondt"
+getReadable ClosedStdin          = "CloseStdin"
 
 getListing :: [Instruction] -> T.Text
 getListing instr = T.pack $ intercalate "\n" $ values where
     values = f 0 $ map getReadable instr
-    f i (x:xs) = (printf "%04d  %s" (i :: Int) x : f (i+1) xs)
+    f i (x:xs) = (printf "0x%04X  %s" (i :: Int) x : f (i+1) xs)
     f _ [] = []
+
+printProgram :: [Instruction] -> IO ()
+printProgram p = TIO.putStrLn $ getListing p
 
 isBuiltin :: T.Text -> Bool
 isBuiltin s =
@@ -62,7 +106,7 @@ executeBuiltin :: T.Text -> [T.Text] -> Shell -> IO Shell
 executeBuiltin "export" (x:_) s = execute (Export (Name x)) s
 
 executeAll' :: [Instruction] -> IO Shell
-executeAll' i = mkShell >>= \s -> executeAll i s
+executeAll' i = executeAll i mkShell
 
 executeAll :: [Instruction] -> Shell -> IO Shell
 executeAll [] s = return s
@@ -83,6 +127,14 @@ getHandle (IOFile _ mode f) = do
   h <- openFile (getValueS f) m
   return h
 
+-- | Variant of hClose that doesn't close standard streams.
+hClose' :: Handle -> IO ()
+hClose' h
+  | h == stdin = return ()
+  | h == stdout = return ()
+  | h == stderr = return ()
+  | otherwise = hClose h
+
 execute :: Instruction -> Shell -> IO Shell
 
 execute (Assign name@(Name var) w) shell = do
@@ -90,82 +142,74 @@ execute (Assign name@(Name var) w) shell = do
     return (setVar name w' shell)
 
 execute (Export name) s = do
-    let result = getVar name s
-    case result of
-      Just (Variable (Name n) value) -> setEnv (T.unpack n) (getValueS value) True
-      Nothing -> putStrLn "not variable"
-    return s
+  let result = getVar name s
+  case result of
+    Just (Variable (Name n) value) -> setEnv (T.unpack n) (getValueS value) True
+    Nothing -> return ()
+  return s
 
-execute WaitRunningActions shell = do
-    sequence (shConduits shell)
-    (exit:_) <- sequence (shWaiters shell)
-    let shell' = (clearConduits $ clearWaiters shell)
-    return shell' { shLastExitCode = exit }
+execute RunPendingActions shell = do
+  sequence (pendingActions shell)
+  return shell { pendingActions = [] }
 
-execute (Command cmd args ins outs) shell = do
+execute ClosedStdin shell = do
+  (r, w) <- createPipe
+  hClose w
+  let cleanup = hClose r
+  let shell1 = pushInputStream r shell
+  let shell2 = pushAction cleanup shell1
+  return shell2
+
+execute (PushHandle h) shell
+  | h == stdin  = return $ pushInputStream stdin shell
+  | h == stdout = return $ pushOutputStream stdout shell
+  | h == stderr = return $ pushErrorStream stderr shell
+
+execute (Pipe t) shell = do
+  (r, w) <- createPipe
+
+  let tgt = case t of
+              Output -> pushOutputStream
+              Error -> pushErrorStream
+
+  let shell1 = pushInputStream r $
+               tgt w shell
+
+  return shell1
+
+execute (Command cmd args ios) shell = do
   (cmdS:argsS) <- mapM substitute (cmd:args)
 
   let cmdName = getValue cmdS
-  let cmdArgs = map getValue argsS
+  let cmdArgs = getValue <$> argsS
 
-  if isBuiltin cmdName
-    then executeBuiltin cmdName cmdArgs shell
+  bin <- findExecutable $ getValueS cmdS
+  if isNothing bin
+    then do
+      TIO.hPutStrLn stderr ("lash: command not found: " <> (getValue cmdS))
+      return shell
     else do
-      bin <- findExecutable (T.unpack cmdName)
-      if isNothing bin
-        then do
-          TIO.hPutStrLn stderr ("xsh: command not found: " <> cmdName)
-          return shell
-        else do
-          let cp = createProc (T.unpack cmdName) (map T.unpack cmdArgs) shell
-          (pIn, pOut, SP.Inherited, procHandle) <-
-            SP.streamingProcess cp
+      let cp = (proc (getValueS cmdS) (getValueS <$> argsS))
 
-          hOuts <- mapM getHandle outs
-          hIns <- mapM getHandle ins
+      let outFiles = filter (\(IOFile _ mode _) -> mode `elem` [IOTo, IOAppend, IOClobber]) ios
 
-          let inputs = case hIns of
-                         [] -> Nothing
-                         (i:is) -> Just $ foldl fuse (CB.sourceHandle i) xs
-                                   where xs = map CB.conduitHandle is :: [Conduit ByteString IO ByteString]
+      outHandles <- mapM getHandle outFiles
 
-          let outputs = case hOuts of
-                          [] -> Nothing
-                          _ -> Just $ foldl fuse x xs
-                               where (x:xs) = map CB.conduitHandle hOuts :: [Conduit ByteString IO ByteString]
+      let (pIn, shell1) = popInputStream shell
+      let (pOut, shell2) = popOutputStream shell1
+      let (pErr, shell3) = popErrorStream shell2
 
-          let conduit = do
-                        when (isJust inputs) (runConduit $ (fromJust inputs) .| CB.sinkHandle pIn)
-                        mapM_ hClose (pIn:hIns)
+      let output = case outHandles of
+                   [] -> CB.sinkHandle pOut
+                   [x] -> CB.conduitHandle x .| CB.sinkHandle pOut
+                   (x:xs) -> foldl fuse (CB.conduitHandle x) (map CB.conduitHandle xs) .| CB.sinkHandle pOut
 
-                        let conduitOuts = if isNothing outputs
-                                            then o1 .| o2
-                                            else o1 .| (fromJust outputs) .| o2
-                                            where o1 = CB.sourceHandle pOut
-                                                  o2 = CB.sinkHandle (shStdout shell)
+      (exit, _, _) <- CP.sourceProcessWithStreams cp
+                                                  (CB.sourceHandle pIn)
+                                                  output
+                                                  (CB.sinkHandle pErr)
 
-                        runConduit conduitOuts
-                        mapM_ hClose (pOut:hOuts)
-                        return ()
+      mapM_ hClose' [pIn, pOut, pErr]
+      mapM_ hClose outHandles
 
-          let shell' = addConduit conduit shell
-          let wait = SP.waitForStreamingProcess procHandle
-          let shell'' = addWaiter wait shell'
-
-          return shell''
-
-createProc :: FilePath -> [String] -> Shell -> CreateProcess
-createProc cmd arg shell = CreateProcess { cmdspec = RawCommand cmd arg
-                                         , cwd = Nothing
-                                         , env = Nothing
-                                         , std_in = UseHandle (shStdin shell)
-                                         , std_out = UseHandle (shStdout shell)
-                                         , std_err = Inherit
-                                         , close_fds = True
-                                         , create_group = False
-                                         , delegate_ctlc = False
-                                         , detach_console = False
-                                         , create_new_console = False
-                                         , new_session = False
-                                         , child_group = Nothing
-                                         , child_user = Nothing }
+      return shell3 { lastExitCode = exit }

@@ -22,53 +22,63 @@ instance Show Variable where
   show (Variable (Name n) v) = unpack $ n <> "=" <> getValue v
 
 data Shell = Shell
-  { shVariables :: [Variable]
-  , shWaiters :: [IO ExitCode]
-  , shStdin :: Handle
-  , shStdout :: Handle
-  , shConduits :: [IO ()]
-  , shLastExitCode :: ExitCode
+  { variables :: [Variable]
+  , inputStreams :: [Handle]
+  , outputStreams :: [Handle]
+  , errorStreams :: [Handle]
+  , pendingActions :: [IO ()]
+  , lastExitCode :: ExitCode
   }
 
 setVar :: Name -> Word -> Shell -> Shell
 setVar name value shell =
-  shell { shVariables = ( (Variable name value):vars) }
-  where vars = filter (\(Variable n _) -> n /= name) (shVariables shell)
+  shell { variables = ( (Variable name value):vars) }
+  where vars = filter (\(Variable n _) -> n /= name) (variables shell)
 
 getVar :: Name -> Shell -> Maybe Variable
-getVar n s = let result = filter (\(Variable n _) -> n == n) (shVariables s) in
+getVar n s = let result = filter (\(Variable n _) -> n == n) (variables s) in
              case result of
                [] -> Nothing
                (x:_) -> Just x
 
-addWaiter :: IO ExitCode -> Shell -> Shell
-addWaiter ac shell =
-  let acs = shWaiters shell in
-  shell { shWaiters = (ac:acs)}
+pushAction :: IO () -> Shell -> Shell
+pushAction c s = let cs = pendingActions s in s { pendingActions = (c:cs) }
 
-clearWaiters :: Shell -> Shell
-clearWaiters s = s { shWaiters = [] }
+pushInputStream :: Handle -> Shell -> Shell
+pushInputStream c s = s { inputStreams = (c:inputStreams s) }
 
-addConduit :: IO () -> Shell -> Shell
-addConduit c s = let cs = shConduits s in s { shConduits = (c:cs) }
+popInputStream :: Shell -> (Handle, Shell)
+popInputStream s = let xs = inputStreams s in (last xs, s { inputStreams = (init xs) })
 
-clearConduits :: Shell -> Shell
-clearConduits s = s { shConduits = [] }
+pushOutputStream :: Handle -> Shell -> Shell
+pushOutputStream c s = s { outputStreams = (c:outputStreams s) }
 
-mkShell :: IO Shell
-mkShell = do
-    return Shell { shVariables = []
-                 , shWaiters = []
-                 , shConduits = []
-                 , shStdin = stdin
-                 , shStdout = stdout
-                 , shLastExitCode = ExitSuccess }
+popOutputStream :: Shell -> (Handle, Shell)
+popOutputStream s = let xs = outputStreams s in (last xs, s { outputStreams = (init xs) })
+
+pushErrorStream :: Handle -> Shell -> Shell
+pushErrorStream c s = s { errorStreams = (c:errorStreams s) }
+
+popErrorStream :: Shell -> (Handle, Shell)
+popErrorStream s = let xs = errorStreams s in (last xs, s { errorStreams = (init xs) })
+
+mkShell :: Shell
+mkShell = Shell { variables = []
+                , pendingActions = []
+                , inputStreams = []
+                , outputStreams = []
+                , errorStreams = []
+                , lastExitCode = ExitSuccess }
 
 instance Show Shell where
-    show s = "================================\n" ++ intercalate "\n" [ "running: " ++ (show $ length $ shWaiters s)
-                              , "variables:\n" ++ (intercalate "\n" (map (\x -> "  * " ++ show x) (shVariables s)))
-                              , "last exit code: " ++ show (shLastExitCode s)
-                              ]
+    show s = "\n============ SHELL ============\n" ++ intercalate "\n"
+             [ "variables:..." ++ (intercalate "\n" ( (show $ length $ variables s):(map (\x -> "  * " ++ show x) (variables s))))
+             , "$?..........." ++ show (toNum $ lastExitCode s)
+             ]
 
 substitute :: Word -> IO Word
 substitute w = return w
+
+toNum :: ExitCode -> Int
+toNum ExitSuccess = 0
+toNum (ExitFailure n) = n
