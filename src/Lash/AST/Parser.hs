@@ -3,10 +3,11 @@ module Lash.AST.Parser where
 
 import Lash.AST
 
+import           Data.Either    (rights, lefts)
 import           Data.Maybe     (catMaybes)
 import           Prelude hiding (Word)
 import qualified Data.Text as T
-import           Text.Parsec
+import           Text.Parsec as P
 import           Text.Parsec.Text
 
 digits :: String
@@ -23,6 +24,24 @@ letters = lowercaseLetters ++ uppercaseLetters
 
 ioFile :: GenParser st IOFile
 ioFile = IOFile <$> optionMaybe fd <*> ioFileMode <*> word
+
+parse :: T.Text -> Either ParseError Command
+parse s = P.parse simpleCommand "" s
+
+simpleCommand :: GenParser st Command
+simpleCommand = do
+    cmdName <- word
+    iow <- many ioFileOrWord
+
+    return $ SimpleCommand cmdName (rights iow) (lefts iow)
+
+ioFileOrWord :: GenParser st (Either IOFile Word)
+ioFileOrWord = do
+    spaces
+    x <- optionMaybe ioFile
+    case x of
+        Just iof -> return $ Left iof
+        Nothing -> Right <$> word
 
 fd :: GenParser st Int
 fd = do

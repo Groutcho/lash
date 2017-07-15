@@ -32,7 +32,8 @@ grep x = Command (Unquoted "grep") [Unquoted x] []
 pg0 = [ ClosedStdin
       , PushHandle stdout
       , PushHandle stderr
-      , cat "lash.cabal"
+      -- , cat "lash.cabal"
+      , cmd' "ls" ["-l"]
       , RunPendingActions
       ]
 
@@ -56,7 +57,10 @@ class Compilable a where
   compile :: a -> [Instruction]
 
 instance Compilable Assignment where
-    compile (Assignment n w) = [Assign n w]
+  compile (Assignment n w) = [Assign n w]
+
+instance Compilable Command where
+  compile (SimpleCommand name args ios) = [Command name args ios]
 
 data Instruction = Assign Name Word
                  | ClosedStdin
@@ -108,6 +112,12 @@ executeBuiltin "export" (x:_) s = execute (Export (Name x)) s
 executeAll' :: [Instruction] -> IO Shell
 executeAll' i = executeAll i mkShell
 
+executeWithStandardStreams :: [Instruction] -> IO Shell
+executeWithStandardStreams i = let program = [ ClosedStdin
+                                             , PushHandle stdout
+                                             , PushHandle stderr ] ++ i
+                               in executeAll' program
+
 executeAll :: [Instruction] -> Shell -> IO Shell
 executeAll [] s = return s
 executeAll (x:xs) s = do
@@ -126,6 +136,16 @@ getHandle (IOFile _ mode f) = do
             IOAppend -> AppendMode
   h <- openFile (getValueS f) m
   return h
+
+getOutputConduit :: [Handle] -> IO [Handle]
+getOutputConduit [x] = return [x]
+getOutputConduit hs = do
+  isTty <- hIsTerminalDevice (last hs)
+  let handles = case isTty of
+                  True -> init hs
+                  False -> hs
+
+  return handles
 
 -- | Variant of hClose that doesn't close standard streams.
 hClose' :: Handle -> IO ()
@@ -162,7 +182,9 @@ execute ClosedStdin shell = do
 
 execute (PushHandle h) shell
   | h == stdin  = return $ pushInputStream stdin shell
-  | h == stdout = return $ pushOutputStream stdout shell
+  | h == stdout = do
+                  h <- openFile "/dev/tty" WriteMode
+                  return $ pushOutputStream h shell
   | h == stderr = return $ pushErrorStream stderr shell
 
 execute (Pipe t) shell = do
@@ -177,7 +199,7 @@ execute (Pipe t) shell = do
 
   return shell1
 
-execute (Command cmd args ios) shell = do
+execute (Command cmd args outIo) shell = do
   (cmdS:argsS) <- mapM substitute (cmd:args)
 
   let cmdName = getValue cmdS
@@ -191,25 +213,34 @@ execute (Command cmd args ios) shell = do
     else do
       let cp = (proc (getValueS cmdS) (getValueS <$> argsS))
 
-      let outFiles = filter (\(IOFile _ mode _) -> mode `elem` [IOTo, IOAppend, IOClobber]) ios
-
-      outHandles <- mapM getHandle outFiles
-
       let (pIn, shell1) = popInputStream shell
       let (pOut, shell2) = popOutputStream shell1
       let (pErr, shell3) = popErrorStream shell2
 
-      let output = case outHandles of
-                   [] -> CB.sinkHandle pOut
-                   [x] -> CB.conduitHandle x .| CB.sinkHandle pOut
-                   (x:xs) -> foldl fuse (CB.conduitHandle x) (map CB.conduitHandle xs) .| CB.sinkHandle pOut
+      outHandles <- mapM getHandle outIo
+      isTtyStdout <- hIsTerminalDevice pOut
+      isTtyStderr <- hIsTerminalDevice pErr
+      if (isTtyStdout && isTtyStderr && (null outHandles))
+        then do
+          (_, _, _, procHnd) <- createProcess cp
+          exit <- waitForProcess procHnd
+          return shell3 { lastExitCode = exit }
+        else do
+          os <- getOutputConduit (outHandles ++ [pOut])
 
-      (exit, _, _) <- CP.sourceProcessWithStreams cp
-                                                  (CB.sourceHandle pIn)
-                                                  output
-                                                  (CB.sinkHandle pErr)
+          let output = case os of
+                        [x] -> CB.sinkHandle x
+                        (x:y:[]) -> CB.conduitHandle x .| CB.sinkHandle y
+                        xs -> let (i,m,e) = (head xs, init $ tail xs, last xs) in
+                               foldl fuse (CB.conduitHandle i) (map CB.conduitHandle m)
+                               .| CB.sinkHandle e
 
-      mapM_ hClose' [pIn, pOut, pErr]
-      mapM_ hClose outHandles
+          (exit, _, _) <- CP.sourceProcessWithStreams cp
+                                                      (CB.sourceHandle pIn)
+                                                      output
+                                                      (CB.sinkHandle pErr)
 
-      return shell3 { lastExitCode = exit }
+          mapM_ hClose' [pIn, pOut, pErr]
+          mapM_ hClose outHandles
+
+          return shell3 { lastExitCode = exit }

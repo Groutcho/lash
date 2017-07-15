@@ -9,6 +9,12 @@ data Assignment = Assignment Name Word
 
 type Filename = Text
 
+data Command =
+  SimpleCommand Word -- command name
+                [Word] -- arguments
+                [IOFile] -- redirects
+  deriving (Show, Eq)
+
 data IOFile = IOFile (Maybe Int) IOFileMode Word
               deriving (Eq, Ord, Show)
 
