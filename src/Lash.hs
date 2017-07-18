@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-
 module Lash where
 
 import Lash.AST
@@ -28,6 +27,8 @@ data Shell = Shell
   , errorStreams :: [Handle]
   , pendingActions :: [IO ()]
   , lastExitCode :: ExitCode
+  , currentInstruction :: Int
+  , incrementPointer :: Bool
   }
 
 setVar :: Name -> Word -> Shell -> Shell
@@ -40,6 +41,11 @@ getVar n s = let result = filter (\(Variable n _) -> n == n) (variables s) in
              case result of
                [] -> Nothing
                (x:_) -> Just x
+
+getVar' :: Name -> Shell -> Variable
+getVar' n s = case (getVar n s) of
+                Nothing -> (Variable n EmptyWord)
+                Just x -> x
 
 pushAction :: IO () -> Shell -> Shell
 pushAction c s = let cs = pendingActions s in s { pendingActions = (c:cs) }
@@ -68,16 +74,15 @@ mkShell = Shell { variables = []
                 , inputStreams = []
                 , outputStreams = []
                 , errorStreams = []
-                , lastExitCode = ExitSuccess }
+                , lastExitCode = ExitSuccess
+                , incrementPointer = True
+                , currentInstruction = 0 }
 
 instance Show Shell where
     show s = "\n============ SHELL ============\n" ++ intercalate "\n"
              [ "variables:..." ++ (intercalate "\n" ( (show $ length $ variables s):(map (\x -> "  * " ++ show x) (variables s))))
              , "$?..........." ++ show (toNum $ lastExitCode s)
              ]
-
-substitute :: Word -> IO Word
-substitute w = return w
 
 toNum :: ExitCode -> Int
 toNum ExitSuccess = 0

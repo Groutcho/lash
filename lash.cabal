@@ -19,6 +19,9 @@ library
                      , Lash.AST
                      , Lash.AST.Parser
                      , Lash.Instructions
+                     , Lash.Interactive
+                     , Lash.Expansion
+                     , Lash.Builtin
   build-depends:       base >= 4.7 && < 5
                      , parsec
                      , text
@@ -30,9 +33,15 @@ library
                      , resourcet
                      , bytestring
                      , unix
+                     , ansi-terminal
+                     , haskeline
+                     , filepath
+                     , Glob
+                     , split
+                     , vector
   default-language:    Haskell2010
 
-executable lash-exe
+executable lash
   hs-source-dirs:      app
   main-is:             Main.hs
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
