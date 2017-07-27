@@ -10,6 +10,7 @@ import Lash.Expansion
 import           Control.Monad (forever, when)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import qualified Data.Vector as V
 import           System.IO
 import           System.Directory
 import           Text.Printf (printf)
@@ -30,8 +31,9 @@ prompt fmt = do
 
 performCycle :: Shell -> IO ()
 performCycle shell = do
-  let ps1 = getVar' (Name "PS1") shell
-  (ps1', shell') <- expand (varValue ps1) shell
+  let shell0 = shell { currentInstruction = 0x0000 }
+  let ps1 = getVar' (Name "PS1") shell0
+  (ps1', shell') <- expand (varValue ps1) shell0
   promptStr <- prompt (getValueS ps1')
   hPutStr stderr promptStr
   input <- readInput
@@ -41,7 +43,7 @@ performCycle shell = do
       case parse input of
         Left err -> (putStrLn $ show err) >> performCycle shell'
         Right cmd -> do
-          shell2 <- executeAll (compile cmd) shell'
+          shell2 <- run (V.fromList (compile cmd)) shell'
           performCycle shell2
 
 readInput :: IO T.Text
