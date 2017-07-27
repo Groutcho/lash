@@ -94,7 +94,13 @@ instance Compilable Pipeline where
 
 instance Compilable Sequence where
   compile (CondEnd p) = compile p
-  compile (CondSeq p op t) = compile p ++ compile t
+  compile (CondSeq p op t) = let first = compile p in
+                             let second = compile t in
+                             let l = length second in
+                             let target = case op of
+                                            AndIf -> (\s -> (lastExitCode s) == ExitSuccess)
+                                            OrIf -> (\s -> (lastExitCode s) /= ExitSuccess) in
+                             first ++ [If (Condition target) 0x001 (l + 1)] ++ second
 
 data Instruction = Assign Name Word
                  | ClosedStdin
@@ -131,7 +137,7 @@ getReadable (Pipe tgt) = "Pipe      " <> (T.pack $ show tgt)
 getReadable RunPendingActions = "RunCondt"
 getReadable ClosedStdin = "CloseStdin"
 getReadable ReverseLastExitCode = "ReverseLastExitCode"
-getReadable (If cond then_ else_) = "If"
+getReadable (If cond then_ else_) = T.pack $ "If " ++ show cond ++ " " ++ (show then_) ++ " " ++ (show else_)
 
 getListing :: [Instruction] -> T.Text
 getListing instr = T.pack $ intercalate "\n" $ values where
@@ -148,7 +154,6 @@ executeAll' i = executeAll i mkShell
 run :: Vector Instruction -> Shell -> IO Shell
 run program shell = do
   let ip = (currentInstruction shell)
-  -- putStrLn (printf "0x%04X" ip)
   if ip >= (length program)
     then return shell
     else do
@@ -244,9 +249,7 @@ execute ClosedStdin shell = do
 
 execute (PushHandle h) shell
   | h == stdin  = return $ pushInputStream stdin shell
-  | h == stdout = do
-                  h <- openFile "/dev/tty" WriteMode
-                  return $ pushOutputStream h shell
+  | h == stdout = return $ pushOutputStream stdout shell
   | h == stderr = return $ pushErrorStream stderr shell
 
 execute (Pipe t) shell = do
@@ -316,7 +319,7 @@ execute (Command (Just cmd) args outIo) shell0 = do
         Nothing -> do
           bin <- findExecutable cmdName
           if isNothing bin
-            then hPutStrLn stderr ("lash: command not found: " ++ cmdName) >> return shell4
+            then hPutStrLn stderr ("lash: command not found: " ++ cmdName) >> return shell4 { lastExitCode = ExitFailure 1}
             else do
               (_, _, _, procHnd) <- createProcess (cp { std_in = UseHandle pIn
                                                       , std_out = UseHandle pOut
