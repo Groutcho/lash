@@ -1,5 +1,5 @@
 name:                lash
-version:             0.1.0.0
+version:             0.0.1.0
 synopsis:            A POSIX shell
 -- description:
 homepage:            https://github.com/groutcho/lash#readme
